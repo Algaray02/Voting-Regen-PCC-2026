@@ -9,10 +9,10 @@ jobs:
     name: Auto-Deploy to Container
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: SSH to RupaCloud Container & Deploy
+      - name: 🚀 SSH to RupaCloud Container & Deploy
         uses: appleboy/ssh-action@v1.0.0
         env:
           APP_ENV_CONTENT: ${{ secrets.APP_ENV }}
@@ -25,9 +25,16 @@ jobs:
           command_timeout: 30m
           envs: APP_ENV_CONTENT
           script: |
-            # 1. Pastikan folder ~/app tersedia dan clone/pull dari branch main
+            # Mode strict & helper log interaktif RuPa Cloud
             set -e
             export GIT_TERMINAL_PROMPT=0
+            log_step() { echo -e "\n\033[1;36m▶ $1\033[0m"; }
+            log_success() { echo -e "\033[1;32m✔ $1\033[0m"; }
+            log_warn() { echo -e "\033[1;33m⚠ $1\033[0m"; }
+            log_err() { echo -e "\033[1;31m✖ $1\033[0m"; }
+
+            echo "::group::🚀 1. Sinkronisasi Repositori Git"
+            log_step "Menyiapkan direktori ~/app dan mengambil branch 'main'..."
             TARGET_REPO="${{ github.repository }}"
             CURRENT_REPO="$(cd ~/app 2>/dev/null && git config --get remote.origin.url 2>/dev/null || true)"
             if [ ! -d ~/app/.git ] || ! echo "$CURRENT_REPO" | grep -q "$TARGET_REPO"; then
@@ -42,20 +49,57 @@ jobs:
               git reset --hard FETCH_HEAD
               git clean -fd
             fi
-            # 2. Inject environment variables dari GitHub Secret (APP_ENV)
+            log_success "Kode repositori berhasil disinkronkan!"
+            echo "::endgroup::"
+
+            echo "::group::🔐 2. Konfigurasi Environment Variables (.env)"
+            log_step "Memeriksa GitHub Secret APP_ENV..."
             if [ -n "$APP_ENV_CONTENT" ]; then
               echo "$APP_ENV_CONTENT" > .env
+              log_success "File .env berhasil diperbarui dari secret!"
+            else
+              log_warn "Secret APP_ENV kosong, menggunakan file .env yang sudah ada jika ada."
             fi
-            # 3. Install dependensi
-            composer install --no-interaction --prefer-dist --optimize-autoloader; if [ -f package.json ]; then npm install; fi
-            if [ -f prisma/schema.prisma ] || grep -q 'prisma' package.json 2>/dev/null; then
-              npx prisma generate 2>/dev/null || true
+            echo "::endgroup::"
+
+            echo "::group::📦 3. Instalasi Dependensi (Laravel (Blade / Inertia React))"
+            log_step "Menjalankan: composer install --no-interaction --prefer-dist --optimize-autoloader; if [ -f package.json ]; then npm install; fi"
+            if composer install --no-interaction --prefer-dist --optimize-autoloader; if [ -f package.json ]; then npm install; fi; then
+              log_success "Instalasi dependensi berhasil!"
+            else
+              log_err "Instalasi dependensi gagal!"
+              echo "::error title=Gagal Install Dependensi::Perintah 'composer install --no-interaction --prefer-dist --optimize-autoloader; if [ -f package.json ]; then npm install; fi' gagal. Periksa dependensi di package.json / composer.json / go.mod Anda."
+              exit 1
             fi
-            # 4. Build application
+            echo "::endgroup::"
+
+            echo "::group::🗄️ 4. Inisialisasi Database / ORM"
+            if [ -f prisma/schema.prisma ] || grep -q '"prisma"' package.json 2>/dev/null; then
+              log_step "Mendeteksi Prisma, menjalankan prisma generate..."
+              npx prisma generate 2>/dev/null || log_warn "Prisma generate menghasilkan peringatan."
+            fi
+            if [ -f artisan ]; then
+              log_step "Mendeteksi Laravel, membersihkan cache konfigurasi..."
+              php artisan config:clear 2>/dev/null || true
+            fi
+            log_success "Pemeriksaan database/ORM selesai."
+            echo "::endgroup::"
+
+            echo "::group::🔨 5. Build & Kompilasi Aplikasi"
             export NODE_OPTIONS="--max-old-space-size=1200"
-            if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi; if ! grep -q '^APP_KEY=' .env 2>/dev/null; then echo 'APP_KEY=' >> .env; fi; grep -q '^LARAVEL_CLOUD=' .env 2>/dev/null || echo 'LARAVEL_CLOUD=1' >> .env; php artisan key:generate --force 2>/dev/null || true; if [ -f package.json ]; then export NODE_OPTIONS='--max-old-space-size=1200'; npm run build; node -e 'const fs=require("fs"),f="public/build/manifest.json";if(fs.existsSync(f)){const d=JSON.parse(fs.readFileSync(f,"utf8"));let c=false;for(const k of Object.keys(d)){if(k.includes("resources/js/pages/")){const a=k.replace("resources/js/pages/","resources/js/Pages/");if(!d[a]){d[a]=d[k];c=true;}}else if(k.includes("resources/js/Pages/")){const a=k.replace("resources/js/Pages/","resources/js/pages/");if(!d[a]){d[a]=d[k];c=true;}}}if(c)fs.writeFileSync(f,JSON.stringify(d,null,2));}' 2>/dev/null || true; fi; chmod -R 775 storage bootstrap/cache 2>/dev/null || true; php artisan storage:link 2>/dev/null || true; if grep -q 'DB_CONNECTION=sqlite' .env 2>/dev/null || ! grep -q 'DB_CONNECTION=' .env 2>/dev/null; then mkdir -p database && touch database/database.sqlite 2>/dev/null || true; fi; php artisan migrate --force 2>/dev/null || true; php artisan optimize:clear 2>/dev/null || true; php artisan config:cache 2>/dev/null || true; php artisan route:cache 2>/dev/null || true; php artisan view:cache 2>/dev/null || true
-            # 5. Konfigurasi Nginx reverse proxy ke port 3000 (jika Nginx terpasang)
+            log_step "Menjalankan: if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi; if ! grep -q '^APP_KEY=' .env 2>/dev/null; then echo 'APP_KEY=' >> .env; fi; grep -q '^LARAVEL_CLOUD=' .env 2>/dev/null || echo 'LARAVEL_CLOUD=1' >> .env; php artisan key:generate --force 2>/dev/null || true; if [ -f package.json ]; then export NODE_OPTIONS='--max-old-space-size=1200'; npm run build; node -e 'const fs=require("fs"),f="public/build/manifest.json";if(fs.existsSync(f)){const d=JSON.parse(fs.readFileSync(f,"utf8"));let c=false;for(const k of Object.keys(d)){if(k.includes("resources/js/pages/")){const a=k.replace("resources/js/pages/","resources/js/Pages/");if(!d[a]){d[a]=d[k];c=true;}}else if(k.includes("resources/js/Pages/")){const a=k.replace("resources/js/Pages/","resources/js/pages/");if(!d[a]){d[a]=d[k];c=true;}}}if(c)fs.writeFileSync(f,JSON.stringify(d,null,2));}' 2>/dev/null || true; fi; chmod -R 775 storage bootstrap/cache 2>/dev/null || true; php artisan storage:link 2>/dev/null || true; if grep -q 'DB_CONNECTION=sqlite' .env 2>/dev/null || ! grep -q 'DB_CONNECTION=' .env 2>/dev/null; then mkdir -p database && touch database/database.sqlite 2>/dev/null || true; fi; php artisan migrate --force 2>/dev/null || true; php artisan optimize:clear 2>/dev/null || true; php artisan config:cache 2>/dev/null || true; php artisan route:cache 2>/dev/null || true; php artisan view:cache 2>/dev/null || true"
+            if if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi; if ! grep -q '^APP_KEY=' .env 2>/dev/null; then echo 'APP_KEY=' >> .env; fi; grep -q '^LARAVEL_CLOUD=' .env 2>/dev/null || echo 'LARAVEL_CLOUD=1' >> .env; php artisan key:generate --force 2>/dev/null || true; if [ -f package.json ]; then export NODE_OPTIONS='--max-old-space-size=1200'; npm run build; node -e 'const fs=require("fs"),f="public/build/manifest.json";if(fs.existsSync(f)){const d=JSON.parse(fs.readFileSync(f,"utf8"));let c=false;for(const k of Object.keys(d)){if(k.includes("resources/js/pages/")){const a=k.replace("resources/js/pages/","resources/js/Pages/");if(!d[a]){d[a]=d[k];c=true;}}else if(k.includes("resources/js/Pages/")){const a=k.replace("resources/js/Pages/","resources/js/pages/");if(!d[a]){d[a]=d[k];c=true;}}}if(c)fs.writeFileSync(f,JSON.stringify(d,null,2));}' 2>/dev/null || true; fi; chmod -R 775 storage bootstrap/cache 2>/dev/null || true; php artisan storage:link 2>/dev/null || true; if grep -q 'DB_CONNECTION=sqlite' .env 2>/dev/null || ! grep -q 'DB_CONNECTION=' .env 2>/dev/null; then mkdir -p database && touch database/database.sqlite 2>/dev/null || true; fi; php artisan migrate --force 2>/dev/null || true; php artisan optimize:clear 2>/dev/null || true; php artisan config:cache 2>/dev/null || true; php artisan route:cache 2>/dev/null || true; php artisan view:cache 2>/dev/null || true; then
+              log_success "Build aplikasi berhasil!"
+            else
+              log_err "Build aplikasi gagal!"
+              echo "::error title=Gagal Build Aplikasi::Perintah build 'if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi; if ! grep -q '^APP_KEY=' .env 2>/dev/null; then echo 'APP_KEY=' >> .env; fi; grep -q '^LARAVEL_CLOUD=' .env 2>/dev/null || echo 'LARAVEL_CLOUD=1' >> .env; php artisan key:generate --force 2>/dev/null || true; if [ -f package.json ]; then export NODE_OPTIONS='--max-old-space-size=1200'; npm run build; node -e 'const fs=require("fs"),f="public/build/manifest.json";if(fs.existsSync(f)){const d=JSON.parse(fs.readFileSync(f,"utf8"));let c=false;for(const k of Object.keys(d)){if(k.includes("resources/js/pages/")){const a=k.replace("resources/js/pages/","resources/js/Pages/");if(!d[a]){d[a]=d[k];c=true;}}else if(k.includes("resources/js/Pages/")){const a=k.replace("resources/js/Pages/","resources/js/pages/");if(!d[a]){d[a]=d[k];c=true;}}}if(c)fs.writeFileSync(f,JSON.stringify(d,null,2));}' 2>/dev/null || true; fi; chmod -R 775 storage bootstrap/cache 2>/dev/null || true; php artisan storage:link 2>/dev/null || true; if grep -q 'DB_CONNECTION=sqlite' .env 2>/dev/null || ! grep -q 'DB_CONNECTION=' .env 2>/dev/null; then mkdir -p database && touch database/database.sqlite 2>/dev/null || true; fi; php artisan migrate --force 2>/dev/null || true; php artisan optimize:clear 2>/dev/null || true; php artisan config:cache 2>/dev/null || true; php artisan route:cache 2>/dev/null || true; php artisan view:cache 2>/dev/null || true' gagal! Periksa error kompilasi kode di atas."
+              exit 1
+            fi
+            echo "::endgroup::"
+
+            echo "::group::🌐 6. Konfigurasi Nginx Reverse Proxy (Port 3000)"
             if which nginx >/dev/null 2>&1; then
+              log_step "Mengonfigurasi Nginx untuk meneruskan trafik ke port 3000..."
               cat << 'NGINX_EOF' > /etc/nginx/sites-available/default
             server {
                 listen 80 default_server;
@@ -75,8 +119,48 @@ jobs:
             }
             NGINX_EOF
               nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+              log_success "Nginx reverse proxy berhasil diarahkan ke port 3000!"
+            else
+              log_warn "Nginx tidak terpasang, aplikasi dapat diakses langsung via port 3000."
             fi
-            # 6. Menjalankan / merestart aplikasi
+            echo "::endgroup::"
+
+            echo "::group::⚡ 7. Menjalankan Aplikasi (PM2 Process Manager)"
+            log_step "Menjalankan: pm2 delete app 2>/dev/null || true; pm2 start "php artisan serve --host=0.0.0.0 --port=3000" --name app"
             pm2 delete app 2>/dev/null || true
-            pm2 delete app 2>/dev/null || true; pm2 start "php artisan serve --host=0.0.0.0 --port=3000" --name app
-            pm2 save 2>/dev/null || true
+            if pm2 delete app 2>/dev/null || true; pm2 start "php artisan serve --host=0.0.0.0 --port=3000" --name app; then
+              pm2 save 2>/dev/null || true
+              log_success "Aplikasi berhasil dijalankan di latar belakang (PM2)!"
+            else
+              log_err "Gagal menjalankan proses aplikasi!"
+              echo "::error title=Gagal Menjalankan Aplikasi::Perintah start 'pm2 delete app 2>/dev/null || true; pm2 start "php artisan serve --host=0.0.0.0 --port=3000" --name app' gagal dieksekusi oleh PM2."
+              exit 1
+            fi
+            echo "::endgroup::"
+
+            echo "::group::🔍 8. Verifikasi Status Akhir"
+            sleep 2
+            pm2 status
+            echo "::notice title=Deployment RuPa Cloud Sukses::Aplikasi Laravel (Blade / Inertia React) berhasil live di port 3000!"
+            echo "::endgroup::"
+
+      - name: 📊 Ringkasan Status Deployment (RuPa Cloud Summary)
+        if: always()
+        run: |
+          echo "## ☁️ RuPa Cloud - Ringkasan Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "### ✅ Deployment Berhasil!" >> $GITHUB_STEP_SUMMARY
+            echo "Aplikasi **Laravel (Blade / Inertia React)** berhasil dideploy dan aktif berjalan di container RuPa Cloud." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Deployment Gagal!" >> $GITHUB_STEP_SUMMARY
+            echo "Terjadi kendala saat proses deployment. Silakan buka step **🚀 SSH to RupaCloud Container & Deploy** di atas dan periksa grup log yang bertanda merah." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Informasi |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 **Framework** | `Laravel (Blade / Inertia React)` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌿 **Branch** | `main` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔖 **Commit SHA** | `${{ github.sha }}` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 👤 **Dipicu Oleh** | `${{ github.actor }}` |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏱️ **Waktu Deploy** | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
