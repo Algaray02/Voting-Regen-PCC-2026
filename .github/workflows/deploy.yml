@@ -38,6 +38,8 @@ jobs:
             else
               cd ~/app
               git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+              git reset --hard HEAD 2>/dev/null || true
+              git clean -fd 2>/dev/null || true
               git fetch --depth 1 origin main
               git checkout -B main FETCH_HEAD
               git reset --hard FETCH_HEAD
