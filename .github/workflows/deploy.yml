@@ -3,122 +3,93 @@ name: Deploy to RupaCloud (Laravel (Blade / Inertia React))
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
-    name: Auto-Deploy to Container
+    name: Auto-Deploy to RupaCloud
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🚀 SSH to RupaCloud Container & Deploy
-        uses: appleboy/ssh-action@v1.0.0
+      - name: 🚀 Trigger RupaCloud Build & Deploy
         env:
-          APP_ENV_CONTENT: ${{ secrets.APP_ENV }}
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          timeout: 60s
-          command_timeout: 30m
-          envs: APP_ENV_CONTENT
-          script: |
-            set -e
-            export GIT_TERMINAL_PROMPT=0
-
-            # 1. Sinkronisasi repositori git
-            TARGET_REPO="${{ github.repository }}"
-            CURRENT_REPO="$(cd ~/app 2>/dev/null && git config --get remote.origin.url 2>/dev/null || true)"
-            if [ ! -d ~/app/.git ] || ! echo "$CURRENT_REPO" | grep -q "$TARGET_REPO"; then
-              rm -rf ~/app
-              git clone --depth 1 -b main https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ~/app
-              cd ~/app
-            else
-              cd ~/app
-              git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-              git reset --hard HEAD 2>/dev/null || true
-              git clean -fd 2>/dev/null || true
-              git fetch --depth 1 origin main
-              git checkout -B main FETCH_HEAD
-              git reset --hard FETCH_HEAD
-              git clean -fd
-            fi
-
-            # 2. Injeksi environment variables dari secrets
-            if [ -n "$APP_ENV_CONTENT" ]; then
-              echo "$APP_ENV_CONTENT" > .env
-            fi
-
-            # 3. Instalasi dependensi
-            composer install --no-interaction --prefer-dist --optimize-autoloader; if [ -f package.json ]; then npm install; fi
-
-            # 4. Persiapan ORM & framework cache
-            if [ -f prisma/schema.prisma ] || grep -q '"prisma"' package.json 2>/dev/null; then
-              npx prisma generate 2>/dev/null || true
-            fi
-            if [ -f artisan ]; then
-              php artisan config:clear 2>/dev/null || true
-            fi
-
-            # 5. Build & kompilasi aplikasi
-            export NODE_OPTIONS="--max-old-space-size=1200"
-            if [ ! -f .env ]; then cp .env.example .env 2>/dev/null || touch .env; fi; if ! grep -q '^APP_KEY=' .env 2>/dev/null; then echo 'APP_KEY=' >> .env; fi; grep -q '^LARAVEL_CLOUD=' .env 2>/dev/null || echo 'LARAVEL_CLOUD=1' >> .env; php artisan key:generate --force 2>/dev/null || true; if [ -f package.json ]; then export NODE_OPTIONS='--max-old-space-size=1200'; npm run build; node -e 'const fs=require("fs"),f="public/build/manifest.json";if(fs.existsSync(f)){const d=JSON.parse(fs.readFileSync(f,"utf8"));let c=false;for(const k of Object.keys(d)){if(k.includes("resources/js/pages/")){const a=k.replace("resources/js/pages/","resources/js/Pages/");if(!d[a]){d[a]=d[k];c=true;}}else if(k.includes("resources/js/Pages/")){const a=k.replace("resources/js/Pages/","resources/js/pages/");if(!d[a]){d[a]=d[k];c=true;}}}if(c)fs.writeFileSync(f,JSON.stringify(d,null,2));}' 2>/dev/null || true; fi; chmod -R 775 storage bootstrap/cache 2>/dev/null || true; php artisan storage:link 2>/dev/null || true; if grep -q 'DB_CONNECTION=sqlite' .env 2>/dev/null || ! grep -q 'DB_CONNECTION=' .env 2>/dev/null; then mkdir -p database && touch database/database.sqlite 2>/dev/null || true; fi; php artisan migrate --force 2>/dev/null || true; php artisan optimize:clear 2>/dev/null || true; php artisan config:cache 2>/dev/null || true; php artisan route:cache 2>/dev/null || true; php artisan view:cache 2>/dev/null || true
-
-            # 6. Konfigurasi Nginx reverse proxy
-            if which nginx >/dev/null 2>&1; then
-              cat << 'NGINX_EOF' > /etc/nginx/sites-available/default
-            server {
-                listen 80 default_server;
-                listen [::]:80 default_server;
-                server_name _;
-                location / {
-                    proxy_pass http://127.0.0.1:3000;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection 'upgrade';
-                    proxy_set_header Host $host;
-                    proxy_set_header X-Real-IP $remote_addr;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto $scheme;
-                    proxy_cache_bypass $http_upgrade;
-                }
-            }
-            NGINX_EOF
-              nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
-            fi
-
-            # 7. Menjalankan proses aplikasi via PM2
-            pm2 delete app 2>/dev/null || true
-            pm2 delete app 2>/dev/null || true; pm2 start "php artisan serve --host=0.0.0.0 --port=3000" --name app
-            pm2 save 2>/dev/null || true
-
-            echo "✔ Aplikasi berhasil diperbarui dan aktif berjalan di port 3000."
-
-      - name: 📊 Ringkasan Status Deployment (RuPa Cloud Summary)
-        if: always()
+          DEPLOY_TOKEN: ${{ secrets.RUPACLOUD_DEPLOY_TOKEN }}
+          ORDER_ID: 'cf898b97-d409-4c4b-b24c-1d9d240bf40b'
+          BASE_DOMAIN: 'rupacloud.web.id'
         run: |
-          cat << 'SUMMARY_EOF' >> $GITHUB_STEP_SUMMARY
-          ## ☁️ RuPa Cloud - Ringkasan Deployment
+          bash << 'EOF'
+          set -e
+          echo "📡 Menghubungi RupaCloud Builder..."
+          DEPLOY_URL="https://$BASE_DOMAIN/api/customer/orders/$ORDER_ID/deploy-webhook"
 
-          SUMMARY_EOF
+          RESPONSE=$(curl -s -X POST "$DEPLOY_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEPLOY_TOKEN" \
+            -d "{\"repo\":\"${{ github.repository }}\",\"branch\":\"main\",\"commitSha\":\"${{ github.sha }}\",\"actor\":\"${{ github.actor }}\",\"frameworkId\":\"laravel\",\"port\":3000}")
 
-          if [ "${{ job.status }}" == "success" ]; then
-            cat << 'SUCCESS_EOF' >> $GITHUB_STEP_SUMMARY
-          ### ✅ Deployment Berhasil!
-          Aplikasi **Laravel (Blade / Inertia React)** berhasil diperbarui dan aktif berjalan di container RuPa Cloud.
-
-          SUCCESS_EOF
-          else
-            cat << 'FAIL_EOF' >> $GITHUB_STEP_SUMMARY
-          ### ❌ Deployment Gagal!
-          Terjadi kendala saat proses deployment. Silakan buka step **🚀 SSH to RupaCloud Container & Deploy** di atas dan periksa grup log yang bertanda merah.
-
-          FAIL_EOF
+          JOB_ID=$(echo "$RESPONSE" | grep -o '"jobId":"[^"]*' | cut -d'"' -f4)
+          if [ -z "$JOB_ID" ]; then
+            echo "❌ Gagal memicu deployment di RupaCloud:"
+            echo "$RESPONSE"
+            exit 1
           fi
 
-          cat << SUMMARY_TABLE_EOF >> $GITHUB_STEP_SUMMARY
+          echo "✔ Deployment berhasil dipicu (Job ID: $JOB_ID)."
+          echo "📊 Memantau proses build & deploy secara live..."
+
+          POLL_URL="https://$BASE_DOMAIN/api/customer/orders/$ORDER_ID/deploy?jobId=$JOB_ID"
+          LAST_COUNT=0
+          FAIL_COUNT=0
+          while true; do
+            STATUS_RES=$(curl -s -H "Authorization: Bearer $DEPLOY_TOKEN" "$POLL_URL")
+            STATUS=$(echo "$STATUS_RES" | grep -o '"status":"[^"]*' | cut -d'"' -f4)
+
+            API_ERR=$(echo "$STATUS_RES" | jq -r '.error // empty' 2>/dev/null || true)
+            if [ -n "$API_ERR" ]; then
+              echo "⚠️ Kendala polling ($API_ERR). Mencoba kembali..."
+              FAIL_COUNT=$((FAIL_COUNT+1))
+              if [ "$FAIL_COUNT" -gt 15 ]; then
+                echo "❌ Gagal memantau deployment karena otorisasi atau koneksi bermasalah."
+                exit 1
+              fi
+              sleep 2
+              continue
+            fi
+            FAIL_COUNT=0
+
+            TOTAL=$(echo "$STATUS_RES" | jq -r '.job.logs | length' 2>/dev/null || echo 0)
+            if [ "$TOTAL" -gt "$LAST_COUNT" ]; then
+              echo "$STATUS_RES" | jq -r --argjson last "$LAST_COUNT" '.job.logs[$last:] | .[] | "[" + .timestamp + "] " + .text' 2>/dev/null || true
+              LAST_COUNT=$TOTAL
+            fi
+
+            if [ "$STATUS" = "SUCCESS" ]; then
+              echo "🎉 Deployment sukses diselesaikan!"
+              break
+            elif [ "$STATUS" = "FAILED" ]; then
+              echo "❌ Deployment gagal!"
+              exit 1
+            fi
+            sleep 2
+          done
+          EOF
+
+      - name: 📊 Ringkasan Status Deployment (RuPa Cloud Summary)
+        if: success()
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## ☁️ RuPa Cloud - Ringkasan Deployment
+          ### ✅ Deployment Berhasil!
+          Aplikasi **Laravel (Blade / Inertia React)** berhasil di-build dan aktif berjalan di container RuPa Cloud.
+
           | Parameter | Informasi |
           | :--- | :--- |
           | 📦 Framework | Laravel (Blade / Inertia React) |
@@ -126,4 +97,13 @@ jobs:
           | 🔖 Commit SHA | ${{ github.sha }} |
           | 👤 Dipicu Oleh | ${{ github.actor }} |
           | ⏱️ Waktu Selesai | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |
-          SUMMARY_TABLE_EOF
+          EOF
+
+      - name: ⚠️ Ringkasan Kegagalan Deployment
+        if: failure()
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## ☁️ RuPa Cloud - Ringkasan Deployment
+          ### ❌ Deployment Gagal!
+          Terjadi kendala saat proses deployment. Silakan periksa log step **🚀 Trigger RupaCloud Build & Deploy** di atas untuk melihat detail kesalahannya.
+          EOF
